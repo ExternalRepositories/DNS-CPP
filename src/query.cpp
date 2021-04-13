@@ -15,6 +15,7 @@
 #include <arpa/nameser.h>
 #include <arpa/inet.h>
 #include <stdexcept>
+#include <ostream>
 #include "compressor.h"
 #include "../include/dnscpp/type.h"
 #include "../include/dnscpp/question.h"
@@ -298,6 +299,18 @@ bool Query::matches(const Response &response) const
         // parse error -- we treat this as a no-match
         return false;
     }
+}
+
+/**
+ *  Print a query in a human-friendly way
+ *  @param  os     output stream
+ *  @param  query  The query
+ *  @return os
+ */
+std::ostream &operator<<(std::ostream &os, const Query &query)
+{
+    // format in a somewhat nice way
+    return os << "{ID: " << query.id() << ", OPCODE: " << (int)query.opcode() << ", questions: " << query.questions() << "}";
 }
     
 /**

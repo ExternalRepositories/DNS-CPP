@@ -17,6 +17,7 @@
  */
 #include <arpa/nameser.h>
 #include <stdint.h>
+#include <iosfwd>
 #include "bits.h"
 
 /**
@@ -186,8 +187,16 @@ public:
      *  @return bool
      */
     bool matches(const Response &response) const;
+
+    /**
+     *  Print a query in a human-friendly way
+     *  @param  os     output stream
+     *  @param  query  The query
+     *  @return os
+     */
+    friend std::ostream &operator<<(std::ostream &os, const Query &query);
 };
-    
+
 /**
  *  End of namespace
  */
