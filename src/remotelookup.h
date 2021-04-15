@@ -26,6 +26,7 @@
 #include "../include/dnscpp/ip.h"
 #include "../include/dnscpp/processor.h"
 #include "connection.h"
+#include <limits>
 
 /**
  *  Begin of namespace
@@ -55,7 +56,7 @@ private:
      *  When was the last time that the job ran?
      *  @var double
      */
-    double _last = 0.0;
+    double _last = std::numeric_limits<double>::max();
     
     /**
      *  Number of messages that have already been sent
@@ -111,6 +112,8 @@ private:
      */
     virtual bool execute(double now) override;
 
+    virtual double timestamp() const noexcept override { return _last; }
+
     /**
      *  When does the job expire?
      *  @return double
@@ -130,13 +133,6 @@ private:
      *  @return bool
      */
     bool wait(double expires);
-
-    /**
-     *  How long should we wait until the next message?
-     *  @param  now     current time
-     *  @return double
-     */
-    virtual double delay(double now) const override;
 
     /**
      *  Retry / send a new message to the nameservers

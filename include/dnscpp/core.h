@@ -20,6 +20,7 @@
  */
 #include "udps.h"
 #include "resolvconf.h"
+#include "queue.h"
 #include "hosts.h"
 #include "bits.h"
 #include "now.h"
@@ -70,30 +71,30 @@ protected:
      *  @var Hosts
      */
     Hosts _hosts;
-
-    /**
-     *  All operations that are in progress and that are waiting for the next 
-     *  (possibly first) attempt. Note that we use multiple queues so that we do
-     *  not have to use a slow (priority) queue.
-     *  @var std::deque<std::shared_ptr<Lookup>>
-     */
-    std::deque<std::shared_ptr<Lookup>> _lookups;
     
     /**
      *  To avoid that external DNS servers, or our own response-buffer, is flooded
      *  with data, there is a limit on the number of operations that can run. If
      *  there are more operations than we can handle, this buffer is used for 
      *  overflow (is not supposed to happen often!)
-     *  @var std::deque<std::shared_ptr<Lookup>>
+     *  @var Queue
      */
-    std::deque<std::shared_ptr<Lookup>> _scheduled;
-    
+    Queue _scheduled;
+
+    /**
+     *  All operations that are in progress and that are waiting for the next
+     *  (possibly first) attempt. Note that we use multiple queues so that we do
+     *  not have to use a slow (priority) queue.
+     *  @var Queue
+     */
+    Queue _lookups;
+
     /**
      *  Lookups for which the max number of attempts have been reached (no further
      *  messages will be sent) and that are waiting for response or expiration
-     *  @var std::deque<std::shared_ptr<Lookup>>
+     *  @var Queue
      */
-    std::deque<std::shared_ptr<Lookup>> _ready;
+    Queue _ready;
     
     /**
      *  The next timer to run
@@ -182,7 +183,9 @@ protected:
      *  @return Operation
      */
     Operation *add(Lookup *lookup);
-    
+
+    Operation *reschedule(std::shared_ptr<Lookup> lookup);
+
     /**
      *  Protected constructor, only the derived class may construct it
      *  @param  loop        your event loop
@@ -281,6 +284,8 @@ public:
      *  @return Inbound         the object that receives the answer
      */
     Inbound *datagram(const Ip &ip, const Query &query);
+
+    void done(std::shared_ptr<Lookup> lookup);
 
     /**
      *  Expose the nameservers

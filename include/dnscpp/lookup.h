@@ -17,6 +17,7 @@
  *  Dependencies
  */
 #include "operation.h"
+#include "queue.h"
 
 /**
  *  Begin of namespace
@@ -33,6 +34,9 @@ namespace DNS {
  */
 class Lookup : public Operation
 {
+private:
+    Queue::ConstIterator _position;
+
 protected:
     /**
      *  Constructor
@@ -58,20 +62,22 @@ public:
      *  @return size_t      number of attempts
      */
     virtual size_t credits() const = 0;
-    
+
     /**
-     *  How long should we wait until the next runtime?
-     *  @param  double      current time
-     *  @return double      delay in seconds
+     *  Get the time at which this lookup was executed
+     *  @return double
      */
-    virtual double delay(double now) const = 0;
-    
+    virtual double timestamp() const noexcept = 0;
+
     /**
      *  Execute the lookup
      *  @param  now         current time
-     *  @return bool        should the lookup be rescheduled?
+     *  @return True when the execution succeeded, false if not
      */
     virtual bool execute(double now) = 0;
+
+    Queue::ConstIterator position() const noexcept { return _position; }
+    void position(Queue::ConstIterator value) { _position = value; }
 };
     
 /**

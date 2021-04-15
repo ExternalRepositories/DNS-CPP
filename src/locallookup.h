@@ -17,7 +17,13 @@
  */
 #include "../include/dnscpp/request.h"
 #include "../include/dnscpp/question.h"
+#include "../include/dnscpp/lookup.h"
+#include "../include/dnscpp/handler.h"
+#include "../include/dnscpp/ip.h"
+#include "../include/dnscpp/type.h"
 #include "../include/dnscpp/reverse.h"
+#include "../include/dnscpp/hosts.h"
+#include <limits>
 
 /**
  *  Begin of namespace
@@ -42,6 +48,8 @@ private:
      */
     bool _ready = false;
 
+    double _timestamp = std::numeric_limits<double>::max();
+
     /**
      *  Method that is called when it is time to process this lookup
      *  @param  now     current time
@@ -51,7 +59,9 @@ private:
     {
         // do nothing if ready
         if (_ready) return false;
-        
+
+        _timestamp = now;
+
         // pass to the hosts
         _hosts.notify(Request(this), _handler, this);
         
@@ -62,16 +72,7 @@ private:
         return false;
     }
 
-    /**
-     *  How long should we wait until the next runtime?
-     *  @param  now         current time
-     *  @return double      delay in seconds
-     */
-    virtual double delay(double now) const override
-    {
-        // should run right away
-        return 0.0;
-    }
+    virtual double timestamp() const noexcept override { return _timestamp; }
 
     /**
      *  How many credits are left (meaning: how many datagrams do we still have to send?)
@@ -80,7 +81,7 @@ private:
     virtual size_t credits() const override
     {
         // local lookups do not send anything at all
-        return 0;
+        return 1;
     }
     
     /**

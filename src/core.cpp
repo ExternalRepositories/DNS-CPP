@@ -14,6 +14,7 @@
 #include "../include/dnscpp/lookup.h"
 #include "../include/dnscpp/loop.h"
 #include "../include/dnscpp/watcher.h"
+#include <cassert>
 
 /**
  *  Begin of namespace
@@ -92,75 +93,14 @@ Core::~Core()
  */
 Operation *Core::add(Lookup *lookup)
 {
-    // add to the operations
-    if (_lookups.size() < _capacity)
-    {
-        // put at the beginning of the list (because we want to run it immediately)
-        _lookups.emplace_front(lookup);
-        
-        // if we already have a timer the expires immediately
-        if (_timer && _immediate) return lookup;
-    
-        // stop existing timer
-        if (_timer) _loop->cancel(_timer, this);
-        
-        // reschedule the timer
-        _timer = _loop->timer(0.0, this);
-        
-        // this is an immediate-timer
-        _immediate = true;
-    }
-    else
-    {
-        // we already have too many operations in progress, delay it
-        _scheduled.emplace_back(lookup);
-    }
-    
-    // expose the operation
-    return lookup;
+    return reschedule(std::shared_ptr<Lookup>(lookup));
 }
 
-/**
- *  Calculate the delay until the next job
- *  @return double      the delay in seconds (or < 0 if there is no need to run a timer)
- */
-double Core::delay(double now)
+Operation *Core::reschedule(std::shared_ptr<Lookup> lookup)
 {
-    // if there is an unprocessed inbound queue, we have to expire asap
-    if (_ipv4.buffered() || _ipv6.buffered()) return 0.0;
-    
-    // if there is nothing scheduled
-    if (_lookups.empty() && _ready.empty()) return -1.0;
-    
-    // if only one is set
-    if (_lookups.empty()) return _ready.front()->delay(now);
-    if (_ready.empty()) return _lookups.front()->delay(now);
-    
-    // get the minimum
-    return std::min(_lookups.front()->delay(now), _ready.front()->delay(now));
-}
-
-/**
- *  Reschedule the timer
- *  @param  now         current time
- */
-void Core::reschedule(double now)
-{
-    // calculate the delay
-    auto seconds = delay(now);
-    
-    // if timer was not set and will not be set
-    if (seconds < 0.0 && _timer == nullptr) return;
-    
-    // if timer was immediate and stays immediate, not changes are needed
-    if (seconds == 0.0 && _timer != nullptr && _immediate) return;
-
-    // if the timer is already running we have to reset it
-    if (_timer != nullptr) _loop->cancel(_timer, this);
-    
-    // check when the next operation should run
-    _timer = seconds < 0 ? nullptr : _loop->timer(seconds, this);
-    _immediate = seconds == 0.0;
+    _scheduled.push(lookup);
+    onBuffered(nullptr);
+    return lookup.get();
 }
 
 /**
@@ -169,63 +109,11 @@ void Core::reschedule(double now)
  */
 void Core::onBuffered(Udps *udp)
 {
-    // if we already had an immediate timer we do not have to set it
-    if (_timer != nullptr && _immediate) return;
-
     // if the timer is already running we have to reset it
     if (_timer != nullptr) _loop->cancel(_timer, this);
 
     // check when the next operation should run
     _timer = _loop->timer(0.0, this);
-    _immediate = true;
-}
-
-/**
- *  Process a lookup
- *  @param  lookup      the lookup to process
- *  @param  now         current time
- *  @return bool        was this lookup indeed processable (false if processed too early)
- */
-bool Core::process(const std::shared_ptr<Lookup> &lookup, double now)
-{
-    // if it is not yet time to run this lookup, we do nothing more
-    if (lookup->delay(now) > 0.0) return false;
-
-    // run the lookup (if this fails the lookup was already finished and we do not have to reschedule it)
-    if (!lookup->execute(now)) return true;
-    
-    // if no more attempts are expected, we put it in a special list
-    if (lookup->credits() == 0) _ready.push_back(lookup);
-    
-    // remember the lookup for the next attempt
-    else _lookups.push_back(lookup);
-    
-    // done
-    return true;
-}
-
-/**
- *  Proceed with more operations
- *  @param  now
- *  @param  count
- */
-void Core::proceed(double now, size_t count)
-{
-    // iterate
-    while (count > 0)
-    {
-        // not possible if nothing is scheduled
-        if (_scheduled.empty()) return;
-        
-        // get the oldest scheduled operation (the process() always returns true)
-        if (!process(_scheduled.front(), now)) return;
-        
-        // this lookup is no longer scheduled
-        _scheduled.pop_front();
-        
-        // one extra operation is scheduled
-        count -= 1;
-    }
 }
 
 /**
@@ -241,65 +129,58 @@ void Core::expire()
     
     // get the current time
     Now now;
-    
-    // number of calls made
-    size_t calls = 0;
-    
-    // first we check the udp sockets to see if they have data availeble
-    calls += _ipv4.deliver(std::max(0L, ssize_t(_maxcalls) - ssize_t(calls)));
 
-    // something was processed, is the side-effect that userspace destucted `this`?
-    if (!watcher.valid()) return;
+    // Step 1: process buffered raw responses.
+    // This removes lookups from _lookups, most likely not at the front of the queue.
+    // This is the sole reason why we need to keep an iterator so that removals are O(1).
+    size_t maxcalls = 8;
+    maxcalls -= _ipv4.deliver(maxcalls); if (!watcher.valid()) return;
+    maxcalls -= _ipv6.deliver(maxcalls); if (!watcher.valid()) return;
 
-    // check the ipv6 sockets too
-    calls += _ipv6.deliver(std::max(0L, ssize_t(_maxcalls) - ssize_t(calls)));
+    // Step 2: invoke callback handlers of all ready lookups (but not too many)
+    for (size_t i = 0, end = std::min(maxcalls, _ready.size()); i != end; ++i) _ready.pop();
 
-    // something was processed, is the side-effect that userspace destucted `this`?
-    if (!watcher.valid()) return;
-
-    // start other operations now that some earlier operations are completed
-    proceed(now, calls);
-    
-    // there was no data to process, so we are going to run jobs
-    while (calls < _maxcalls && !_lookups.empty())
+    // Step 3: execute awaiting lookups
+    while (_lookups.size() < _capacity && !_scheduled.empty())
     {
-        // get the oldest operation
-        if (!process(_lookups.front(), now)) break;
-        
-        // maybe the userspace call ended up in `this` being destructed
-        if (!watcher.valid()) return;
-        
-        // log one extra call (this is not entirely correct, maybe there was no call to userspace)
-        calls += 1;
-        
-        // forget this lookup because we ran it
-        _lookups.pop_front();
-    }
-    
-    // look at lookups that can no longer be repeated, but for which we're waiting for answer
-    while (calls < _maxcalls && !_ready.empty())
-    {
-        // get the oldest operation
-        if (!process(_ready.front(), now)) break;
-
-        // maybe the userspace call ended up in `this` being destructed
-        if (!watcher.valid()) return;
-
-        // log one extra call
-        calls += 1;
-        
-        // forget this lookup because we are going to run it
-        _ready.pop_front();
+        auto lookup = _scheduled.pop();
+        if (lookup->execute(now)) _lookups.push(lookup);
+        else if (lookup->credits()) _scheduled.push(lookup);
+        else _ready.push(lookup);
     }
 
-    // if there are more slots for scheduled operations, we start them now
-    // @todo    this is wrong because _lookups.size() does not hold the number of active lookups (this
-    //          is a queue-datastructure that might also hold already finished lookups that will be
-    //          harvested when they hit the front of the queue, but that should not count for the capacity)
-    if (_capacity > _lookups.size()) proceed(now, _capacity - _lookups.size());
-    
-    // reset the timer
-    reschedule(now);
+    // Step 4: pop off the timed-out lookups, and
+    // - if the lookup has credits left (retries), stick it into the scheduled queue again
+    // - otherwise there are no more attempts left, we put it into the ready queue
+    const double timeouttime = now - _timeout;
+    while (!_lookups.empty() && _lookups.front()->timestamp() <= timeouttime)
+    {
+        auto lookup = _lookups.pop();
+        if (lookup->credits()) _scheduled.push(lookup);
+        else _ready.push(lookup);
+    }
+
+    // Step 5: schedule the timer to fire at an appropriate time.
+    // There might be ready lookups ready to have their callback handlers invoked still,
+    // since we only process a fixed amount of them per timer expiry. In that case,
+    // let's expire as soon as possible again.
+    if (!_ready.empty())
+    {
+        _timer = _loop->timer(0.0, this);
+    }
+    // Or it may have added inflight lookups.
+    // set the timer to expire at the time when the front-most lookup expires.
+    else if (!_lookups.empty())
+    {
+        const double earliest = _lookups.front()->timestamp() + _timeout - now;
+        _timer = _loop->timer(std::max(0.0, earliest), this);
+    }
+    else
+    {
+        // At this point, both _ready and _lookups were empty.
+        // So the _scheduled queue must also be empty.
+        assert(_scheduled.empty());
+    }
 }
 
 /**
@@ -316,6 +197,15 @@ Inbound *Core::datagram(const Ip &ip, const Query &query)
     case 6:     return _ipv6.send(ip, query);
     default:    return nullptr;
     }
+}
+
+void Core::done(std::shared_ptr<Lookup> lookup)
+{
+    bool front = _lookups.pop(lookup);
+    _ready.push(lookup);
+    if (!front) return;
+    // need to reschedule the timer so that it times out earlier
+    // @todo or may just let it expire
 }
 
 /**

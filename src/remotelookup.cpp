@@ -18,6 +18,7 @@
 #include "../include/dnscpp/handler.h"
 #include "../include/dnscpp/question.h"
 #include "fakeresponse.h"
+#include <cassert>
 
 /**
  *  Begin of namespace
@@ -40,12 +41,16 @@ RemoteLookup::RemoteLookup(Core *core, const char *domain, ns_type type, const B
  */
 RemoteLookup::~RemoteLookup()
 {
-    // cleanup the job (note that we have this cleanup-function because we
-    // normally want to cleanup _before_ we report back to userspace, because
-    // you never know what userspace will do (maybe even destruct the _core pointer),
-    // but if userspace decided to kill the job (by calling job->cancel()) we still
-    // have to do some cleaning ourselves
-    cleanup();
+    try
+    {
+             if (_response)                   _handler->onReceived(this, *_response);
+        else if (_rcode != 0)                 _handler->onFailure(this, _rcode);
+        else if (_count >= _core->attempts()) _handler->onTimeout(this);
+    }
+    catch (...)
+    {
+        // @todo: don't swallow exceptions?
+    }
 }
 
 /**
@@ -54,29 +59,11 @@ RemoteLookup::~RemoteLookup()
  */
 size_t RemoteLookup::credits() const
 {
-    // if we're tcp connected, we're not going to send more datagrams
-    if (_connection) return 0;
-    
-    // number of attempts left
-    return _core->attempts() > _count ? _core->attempts() - _count : 0;
-}
+    // precondition check
+    assert(_core->attempts() >= _count);
 
-/**
- *  How long should we wait until the next message?
- *  @param  now         Current time
- *  @return double
- */
-double RemoteLookup::delay(double now) const
-{
-    // if the operation is ready, we should run asap (so that it is removed)
-    // if the operation never ran it should also run immediately
-    if (_count == 0 || _handler == nullptr) return 0.0;
-    
-    // if already doing a tcp lookup, or when all attemps have passed, we wait until the expire-time
-    if (_connection || _count >= _core->attempts()) return std::max(0.0, _last + _core->timeout() - now);
-    
-    // wait until we can send a next datagram
-    return std::max(_last + _core->interval() - now, 0.0);
+    // number of attempts left
+    return _core->attempts() - _count;
 }
 
 /**
@@ -115,6 +102,8 @@ Handler *RemoteLookup::cleanup()
     // unsubscribe from all inbound sockets
     unsubscribe();
 
+    if (handler) _core->done(shared_from_this());
+
     // expose the handler
     return handler;
 }
@@ -139,54 +128,26 @@ bool RemoteLookup::timeout()
  */
 bool RemoteLookup::execute(double now)
 {
-    // if the result has already been reported to user-space, we do not have to do anything
-    if (_handler == nullptr) return false;
-    
-    // when job times out
-    if ((_connection || _count >= _core->attempts()) && now > _last + _core->timeout()) return timeout();
-
-    // if we reached the max attempts we stop sending out more datagrams, but we keep active
-    if (_count >= _core->attempts()) return true;
-    
-    // if the operation is already using tcp we simply wait for that
-    if (_connection) return true;
-
     // access to the nameservers + the number we have
     auto &nameservers = _core->nameservers();
     size_t nscount = nameservers.size();
     
-    // what if there are no nameservers?
-    if (nscount == 0) return timeout();
-
     // which nameserver should we sent now?
-    size_t target = _core->rotate() ? (_count + _id) % nscount : _count % nscount;
-    
-    // iterator for the next loop
-    size_t i = 0;
+    const Ip &nameserver = nameservers[_core->rotate() ? (_count + _id) % nscount : _count % nscount];
 
-    // send a datagram to each nameserver
-    for (auto &nameserver : nameservers)
+    // send a datagram to this server
+    if (auto *inbound = _core->datagram(nameserver, _query))
     {
-        // is this the target nameserver? (we use ++ postfix operator on purpose)
-        if (target != i++) continue;
-
-        // send a datagram to this server
-        // @todo check for nullptr
-        auto *inbound = _core->datagram(nameserver, _query);
-        
         // subscribe to the answers that might come in from now onwards
         inbound->subscribe(this, nameserver, _query.id());
-        
+
         // store this subscription, so that we can unsubscribe on success
         _subscriptions.emplace(std::make_pair(inbound, nameserver));
-        
-        // one more message has been sent
-        _count += 1; _last = now;
-        
-        // for now we do not yet send the next message
-        break;
     }
-    
+
+    // one more attempt has been made
+    _count += 1; _last = now;
+
     // we want to be rescheduled
     return true;
 }
@@ -281,7 +242,7 @@ void RemoteLookup::onFailure(Connection *connection, const Response &truncated)
 {
     // if the operation was already cancelled
     if (_handler == nullptr) return;
-    
+
     // we failed to get the regular response, so we send back the truncated response
     cleanup()->onReceived(this, truncated);
 }
@@ -293,7 +254,7 @@ void RemoteLookup::cancel()
 {
     // do nothing if already cancelled
     if (_handler == nullptr) return;
-    
+
     // cleanup, and remove to userspace
     cleanup()->onCancelled(this);
 }
