@@ -41,16 +41,7 @@ RemoteLookup::RemoteLookup(Core *core, const char *domain, ns_type type, const B
  */
 RemoteLookup::~RemoteLookup()
 {
-    try
-    {
-             if (_response)                   _handler->onReceived(this, *_response);
-        else if (_rcode != 0)                 _handler->onFailure(this, _rcode);
-        else if (_count >= _core->attempts()) _handler->onTimeout(this);
-    }
-    catch (...)
-    {
-        // @todo: don't swallow exceptions?
-    }
+    cleanup();
 }
 
 /**

@@ -43,7 +43,7 @@ class Inbound;
 /**
  *  Class definition
  */
-class RemoteLookup : public Lookup, private Connection::Handler, private Processor
+class RemoteLookup : public Lookup, public std::enable_shared_from_this<RemoteLookup>, private Connection::Handler, private Processor
 {
 private:
     /**

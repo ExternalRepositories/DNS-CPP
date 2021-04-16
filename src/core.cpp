@@ -91,7 +91,7 @@ Core::~Core()
  *  @param  lookup
  *  @return Operation
  */
-Operation *Core::add(Lookup *lookup)
+Operation *Core::add(std::shared_ptr<Lookup> lookup)
 {
     return reschedule(std::shared_ptr<Lookup>(lookup));
 }

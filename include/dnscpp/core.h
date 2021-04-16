@@ -182,7 +182,7 @@ protected:
      *  @param  lookup
      *  @return Operation
      */
-    Operation *add(Lookup *lookup);
+    Operation *add(std::shared_ptr<Lookup> lookup);
 
     Operation *reschedule(std::shared_ptr<Lookup> lookup);
 
